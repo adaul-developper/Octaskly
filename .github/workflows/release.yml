@@ -1,0 +1,237 @@
+name: Cross-Platform Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., v1.0.0)'
+        required: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: octaskly
+            artifact_name: octaskly-linux-x64
+
+          # macOS Intel
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: octaskly
+            artifact_name: octaskly-macos-x64
+
+          # macOS ARM64 (Apple Silicon)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: octaskly
+            artifact_name: octaskly-macos-arm64
+
+          # Windows MSVC
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: octaskly.exe
+            artifact_name: octaskly-windows-x64.exe
+
+          # Android ARM64 (Termux)
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+            binary_name: octaskly
+            artifact_name: octaskly-android-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-android \
+            binutils-aarch64-linux-android
+
+      - name: Setup Android NDK (for aarch64-linux-android)
+        if: matrix.target == 'aarch64-linux-android'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          strip target/${{ matrix.target }}/release/${{ matrix.binary_name }} || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: octaskly-${{ matrix.artifact_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          retention-days: 5
+
+      - name: Create checksums
+        if: runner.os == 'Linux'
+        run: |
+          cd target/${{ matrix.target }}/release
+          sha256sum ${{ matrix.binary_name }} > ${{ matrix.artifact_name }}.sha256
+          cat ${{ matrix.artifact_name }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: release-artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release-files
+          
+          # Copy all binaries
+          for artifact_dir in release-artifacts/*/; do
+            for file in "$artifact_dir"*; do
+              if [ -f "$file" ]; then
+                base=$(basename "$file")
+                echo "Processing $base"
+
+                # Copy raw binary
+                cp "$file" release-files/
+
+                # Create platform archive preserving executable bit on Unix
+                if [[ "$base" == *.exe ]]; then
+                  # Create zip for Windows executable
+                  (cd release-files && zip -q "${base}.zip" "$base")
+                else
+                  # Create tar.gz that preserves executable bit
+                  tmpdir=$(mktemp -d)
+                  cp "$file" "$tmpdir/$base"
+                  chmod +x "$tmpdir/$base" || true
+                  tar -C "$tmpdir" -czf "release-files/${base}.tar.gz" "$base"
+                  rm -rf "$tmpdir"
+                fi
+
+              fi
+            done
+          done
+
+          # Create checksums for everything in release-files
+          cd release-files
+          sha256sum * > SHA256SUMS.txt || true
+          ls -lh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            release-files/*
+            CHANGELOG.md
+          draft: false
+          prerelease: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-installers:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Publish installer scripts
+        run: |
+          # Make installers executable
+          chmod +x scripts/install.sh
+          
+          # You can add additional publishing logic here
+          echo "Installer scripts published"
+          ls -lh scripts/install.*
+
+  post-build:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create release notes
+        run: |
+          echo "## Octaskly ${{ steps.version.outputs.version }}" > RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Download" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "**Installers:**" >> RELEASE_NOTES.md
+          echo '```bash' >> RELEASE_NOTES.md
+          echo "# Linux/macOS/Termux" >> RELEASE_NOTES.md
+          echo "curl -sSL https://github.com/adauldev/octaskly/releases/latest/download/install.sh | bash" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "# Windows" >> RELEASE_NOTES.md
+          echo "# Download install.bat from releases and run as administrator" >> RELEASE_NOTES.md
+          echo '```' >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Platform Availability" >> RELEASE_NOTES.md
+          echo "- Linux x86_64: ✅" >> RELEASE_NOTES.md
+          echo "- macOS x86_64 (Intel): ✅" >> RELEASE_NOTES.md
+          echo "- macOS ARM64 (Apple Silicon): ✅" >> RELEASE_NOTES.md
+          echo "- Windows x86_64: ✅" >> RELEASE_NOTES.md
+          echo "- Android/Termux ARM64: ✅" >> RELEASE_NOTES.md
+
+      - name: Create tarballs for distribution
+        run: |
+          mkdir -p dist
+          
+          # Create installation packages
+          for binary in release-artifacts/*/*.exe release-artifacts/*/*[!e][!x][!e]; do
+            if [ -f "$binary" ]; then
+              name=$(basename "$binary")
+              if [[ "$name" == *.exe ]]; then
+                cp "$binary" "dist/$name"
+              else
+                cp "$binary" "dist/$name"
+                chmod +x "dist/$name"
+                # Create tarball for Unix
+                tar czf "dist/${name}.tar.gz" -C dist "$name" 2>/dev/null || true
+              fi
+            fi
+          done
+
+      - name: List release files
+        run: |
+          echo "Release files prepared:"
+          ls -lh dist/ || echo "No dist files"
+          ls -lh release-files/ 2>/dev/null || echo "No release-files"
