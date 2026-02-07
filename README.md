@@ -791,4 +791,11 @@ More FAQs: [HELP.md](HELP.md)
 
 ---
 
-**Built with ❤️ for distributed computing.**
+**Built with ❤️ by adaul-developper team.**
+
+## Contributors
+
+- **Lead Developer**: [@0xddekaee](https://github.com/0xddekaee)
+- **Publisher**: [@adauldev](https://github.com/adauldev)
+
+See [CONTRIBUTOR.md](CONTRIBUTOR.md) for full contributor information.

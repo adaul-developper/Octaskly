@@ -123,6 +123,9 @@
 5. **Examples**
    - `examples/basic_usage.rs` - Library usage examples
 
+6. **Contributors**
+   - `CONTRIBUTOR.md` - Contributor information
+
 ### 🧪 Testing Results
 
 ```
